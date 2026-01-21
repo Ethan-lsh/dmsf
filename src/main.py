@@ -1,8 +1,10 @@
 import networkx as nx
 import numpy as np
+import matplotlib
 import matplotlib.pyplot as plt
 from collections import deque, defaultdict
 import random
+import matplotlib
 
 # Qiskit Imports
 from qiskit import QuantumCircuit
@@ -11,6 +13,7 @@ from qiskit.converters import circuit_to_dag
 from smart_compiler import SmartCompiler
 from quantum_workload import QasmWorkload
 from elastic_architecture import ElasticArchitecture
+from distributed_architecture import DistributedArchitecture
 from runtime_simulator import RuntimeSimulator
 from configuration import Configuration
 
@@ -65,6 +68,78 @@ def visualize_hotspot_and_utilization(sim, output_file):
     plt.savefig(output_file, dpi=300)
     print(f"[Output] Plot saved to {output_file}")
 
+def visualize_hotspot_and_factories(sim, output_file):
+    """
+    핫스팟/버퍼 영역과 MSF 타일 배치 시각화
+    """
+    arch = sim.arch
+    workload = sim.workload
+    error_grid = np.zeros((arch.size, arch.size), dtype=float)
+    logical_error = Configuration.logical_error_rate_per_cycle()
+    for q, (x, y) in arch.logical_to_phys.items():
+        t_count = workload.t_gate_counts.get(q, 0)
+        error_grid[x, y] = t_count * logical_error
+    
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+    vmax = float(np.max(error_grid)) if np.max(error_grid) > 0 else 1.0
+    im = ax1.imshow(error_grid, cmap="Reds", interpolation="nearest", vmin=0.0, vmax=vmax)
+    ax1.set_title("Hotspot Tile Error Rate")
+    ax1.set_xticks([])
+    ax1.set_yticks([])
+    
+    for q, (x, y) in arch.logical_to_phys.items():
+        ax1.text(y, x, f"Q{q}", ha="center", va="center", fontsize=6, color="black")
+    
+    fig.colorbar(im, ax=ax1)
+
+    for (x, y) in arch.factory_zone_tiles:
+        buffer_rect = matplotlib.patches.Rectangle(
+            (y - 0.5, x - 0.5),
+            1,
+            1,
+            fill=False,
+            edgecolor="#1f77b4",
+            linewidth=1.0,
+        )
+        ax1.add_patch(buffer_rect)
+    
+    for (x, y) in arch.hotspot_tiles:
+        hotspot_rect = matplotlib.patches.Rectangle(
+            (y - 0.5, x - 0.5),
+            1,
+            1,
+            fill=False,
+            edgecolor="#d62728",
+            linewidth=1.5,
+        )
+        ax1.add_patch(hotspot_rect)
+    
+    for (x, y) in arch.active_factories.keys():
+        factory_rect = matplotlib.patches.Rectangle(
+            (y - 0.5, x - 0.5),
+            1,
+            1,
+            fill=False,
+            edgecolor="#2ca02c",
+            linewidth=1.5,
+        )
+        ax1.add_patch(factory_rect)
+    legend_items = [
+        matplotlib.lines.Line2D([0], [0], color="#d62728", lw=2, label="Hotspot"),
+        matplotlib.lines.Line2D([0], [0], color="#1f77b4", lw=2, label="Buffer"),
+        matplotlib.lines.Line2D([0], [0], color="#2ca02c", lw=2, label="MSF"),
+    ]
+    ax1.legend(handles=legend_items, loc="upper right", fontsize=8, framealpha=0.9)
+    
+    ax2.plot(sim.factory_utilization_history)
+    ax2.set_title("Dynamic Factory Utilization over Time")
+    ax2.set_xlabel("Time (Cycles)")
+    ax2.set_ylabel("Active Factories")
+    ax2.grid(True)
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=300)
+    print(f"[Output] Plot saved to {output_file}")
+
 if __name__ == "__main__":
     # 1. Setup (Monte Carlo)
     GRID_SIZE = 12
@@ -72,9 +147,9 @@ if __name__ == "__main__":
     num_qubits = 5
     num_gates = 10
     distances = [3, 5, 7]
-    NUM_FIXED_FACTORIES = 2
     
-    results = []
+    elastic_results = []
+    fixed_results = []
     
     for d in distances:
         Configuration.CODE_DISTANCE = d
@@ -90,6 +165,31 @@ if __name__ == "__main__":
             compiler = SmartCompiler(workload, grid_size=GRID_SIZE)
             mapping, hotspot_info = compiler.perform_clustering_mapping()
             
+            spacing = Configuration.DISTRIBUTED_FACTORY_SPACING
+            rows = (GRID_SIZE + spacing - 1) // spacing
+            cols = (GRID_SIZE + spacing - 1) // spacing
+            num_factories = rows * cols
+            distributed_k = Configuration.distributed_factory_k(
+                Configuration.DISTRIBUTED_TOTAL_K,
+                num_factories,
+                Configuration.DISTRIBUTED_DISTILL_ROUNDS,
+            )
+            t_gate_latency = Configuration.t_gate_latency_cycles()
+            # distill_time_cycles, distill_round_output_error, distill_round_success_prob
+            # are intentionally not stored in results.
+            distributed_output_capacity = Configuration.distributed_output_capacity(
+                Configuration.DISTRIBUTED_TOTAL_K,
+                num_factories,
+                Configuration.DISTRIBUTED_DISTILL_ROUNDS,
+                Configuration.RAW_INJECTION_ERROR,
+            )
+            distributed_area = Configuration.distributed_factories_area(
+                num_factories,
+                Configuration.DISTRIBUTED_TOTAL_K,
+                Configuration.DISTRIBUTED_DISTILL_ROUNDS,
+                Configuration.CODE_DISTANCE,
+            )
+            
             # 3. Architecture & Sim (Elastic)
             arch_elastic = ElasticArchitecture(size=GRID_SIZE)
             arch_elastic.apply_mapping(mapping, hotspot_info)
@@ -97,66 +197,61 @@ if __name__ == "__main__":
             sim_elastic = RuntimeSimulator(workload, arch_elastic, policy_mode="elastic")
             sim_elastic.run()
             if run_idx == 0:
-                plot_file = f"output/hotspot_utilization_d{d}.png"
-                visualize_hotspot_and_utilization(sim_elastic, plot_file)
+                plot_file = f"output/hotspot_factories_elastic_d{d}.png"
+                visualize_hotspot_and_factories(sim_elastic, plot_file)
             
-            results.append({
+            elastic_results.append({
                 "run": run_idx,
                 "code_distance": d,
                 "policy": "elastic",
                 "final_fidelity": sim_elastic.circuit_fidelity,
                 "logical_failure_prob": sim_elastic.logical_failure_prob,
                 "total_cycles": sim_elastic.current_time,
-                "distillation_overhead": sim_elastic.total_distillation_overhead,
-                "build_count": sim_elastic.build_count,
-                "reuse_count": sim_elastic.reuse_count,
-                "stall_count": sim_elastic.stall_count,
+                "t_gate_latency": t_gate_latency,
+                "distributed_output_capacity": distributed_output_capacity,
+                "distributed_area": distributed_area,
                 "avg_wait": float(np.mean(sim_elastic.wait_times)) if sim_elastic.wait_times else 0.0,
                 "p95_wait": float(np.percentile(sim_elastic.wait_times, 95)) if sim_elastic.wait_times else 0.0,
                 "avg_transport_dist": float(np.mean(sim_elastic.transport_distances)) if sim_elastic.transport_distances else 0.0,
+                "avg_t_parallelism": float(np.mean(sim_elastic.t_parallelism_history)) if sim_elastic.t_parallelism_history else 0.0,
+                "avg_congestion": float(np.mean(sim_elastic.congestion_factor_history)) if sim_elastic.congestion_factor_history else 0.0,
+                "avg_n_distill": float(np.mean(sim_elastic.n_distill_history)) if sim_elastic.n_distill_history else 0.0,
+                "t_total_estimate": sim_elastic.t_total_estimate,
             })
             
             # 4. Architecture & Sim (Fixed baseline)
-            arch_fixed = ElasticArchitecture(size=GRID_SIZE)
+            arch_fixed = DistributedArchitecture(size=GRID_SIZE)
             arch_fixed.apply_mapping(mapping, hotspot_info)
-            
-            # Hot-qubit 기반 고정 공장 배치
-            hot_qubits = sorted(
-                range(workload.num_qubits),
-                key=lambda q: workload.t_gate_counts[q],
-                reverse=True,
-            )
-            placed = 0
-            for q in hot_qubits:
-                if placed >= NUM_FIXED_FACTORIES:
-                    break
-                x, y = mapping[q]
-                if arch_fixed.grid[x, y] != 2:
-                    arch_fixed.allocate_factory(x, y, force=True)
-                    placed += 1
+            arch_fixed.configure_distributed_factories(Configuration.DISTRIBUTED_FACTORY_SPACING)
+            num_factories = len(arch_fixed.distributed_region_factories)
             
             sim_fixed = RuntimeSimulator(workload, arch_fixed, policy_mode="fixed")
             sim_fixed.run()
             if run_idx == 0:
-                plot_file = f"output/hotspot_utilization_fixed_d{d}.png"
-                visualize_hotspot_and_utilization(sim_fixed, plot_file)
+                plot_file = f"output/hotspot_factories_fixed_d{d}.png"
+                visualize_hotspot_and_factories(sim_fixed, plot_file)
 
-            results.append({
+            fixed_results.append({
                 "run": run_idx,
                 "code_distance": d,
                 "policy": "fixed",
                 "final_fidelity": sim_fixed.circuit_fidelity,
                 "logical_failure_prob": sim_fixed.logical_failure_prob,
                 "total_cycles": sim_fixed.current_time,
-                "distillation_overhead": sim_fixed.total_distillation_overhead,
-                "build_count": sim_fixed.build_count,
-                "reuse_count": sim_fixed.reuse_count,
-                "stall_count": sim_fixed.stall_count,
+                "t_gate_latency": t_gate_latency,
+                "distributed_output_capacity": distributed_output_capacity,
+                "distributed_area": distributed_area,
                 "avg_wait": float(np.mean(sim_fixed.wait_times)) if sim_fixed.wait_times else 0.0,
                 "p95_wait": float(np.percentile(sim_fixed.wait_times, 95)) if sim_fixed.wait_times else 0.0,
                 "avg_transport_dist": float(np.mean(sim_fixed.transport_distances)) if sim_fixed.transport_distances else 0.0,
+                "avg_t_parallelism": float(np.mean(sim_fixed.t_parallelism_history)) if sim_fixed.t_parallelism_history else 0.0,
+                "avg_congestion": float(np.mean(sim_fixed.congestion_factor_history)) if sim_fixed.congestion_factor_history else 0.0,
+                "avg_n_distill": float(np.mean(sim_fixed.n_distill_history)) if sim_fixed.n_distill_history else 0.0,
+                "t_total_estimate": sim_fixed.t_total_estimate,
             })
     
+    all_results = elastic_results + fixed_results
+
     # 4. CSV Output
     import csv
     output_file = "output/monte_carlo_results.csv"
@@ -170,17 +265,20 @@ if __name__ == "__main__":
                 "final_fidelity",
                 "logical_failure_prob",
                 "total_cycles",
-                "distillation_overhead",
-                "build_count",
-                "reuse_count",
-                "stall_count",
+                "t_gate_latency",
+                "distributed_output_capacity",
+                "distributed_area",
                 "avg_wait",
                 "p95_wait",
                 "avg_transport_dist",
+                "avg_t_parallelism",
+                "avg_congestion",
+                "avg_n_distill",
+                "t_total_estimate",
             ],
         )
         writer.writeheader()
-        writer.writerows(results)
+        writer.writerows(all_results)
     print(f"[Output] Monte Carlo results saved to {output_file}")
     
     # 5. Summary (Mean & 95% CI)
@@ -196,10 +294,25 @@ if __name__ == "__main__":
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         
+        summary_metrics = [
+            "final_fidelity",
+            "logical_failure_prob",
+            "total_cycles",
+            "t_gate_latency",
+            "distributed_output_capacity",
+            "distributed_area",
+            "avg_wait",
+            "p95_wait",
+            "avg_transport_dist",
+            "avg_t_parallelism",
+            "avg_congestion",
+            "avg_n_distill",
+            "t_total_estimate",
+        ]
         for d in distances:
             for policy in ["elastic", "fixed"]:
-                for metric in ["final_fidelity", "logical_failure_prob", "total_cycles", "distillation_overhead", "avg_wait", "p95_wait", "avg_transport_dist"]:
-                    subset = [r for r in results if r["code_distance"] == d and r["policy"] == policy]
+                for metric in summary_metrics:
+                    subset = [r for r in all_results if r["code_distance"] == d and r["policy"] == policy]
                     values = np.array([r[metric] for r in subset], dtype=float)
                     mean = float(np.mean(values))
                     # 95% CI (normal approximation)
@@ -217,7 +330,7 @@ if __name__ == "__main__":
     # 5b. Policy Comparison (elastic vs fixed)
     comparison_file = "output/policy_comparison.csv"
     by_key = {}
-    for r in results:
+    for r in all_results:
         key = (r["code_distance"], r["run"])
         by_key.setdefault(key, {})[r["policy"]] = r
     
@@ -230,7 +343,6 @@ if __name__ == "__main__":
                 "speedup_total_cycles",
                 "delta_fidelity",
                 "delta_logical_failure_prob",
-                "delta_distillation_overhead",
                 "delta_avg_wait",
                 "delta_avg_transport_dist",
             ],
@@ -248,22 +360,33 @@ if __name__ == "__main__":
                 "speedup_total_cycles": speedup,
                 "delta_fidelity": el["final_fidelity"] - fx["final_fidelity"],
                 "delta_logical_failure_prob": fx["logical_failure_prob"] - el["logical_failure_prob"],
-                "delta_distillation_overhead": fx["distillation_overhead"] - el["distillation_overhead"],
                 "delta_avg_wait": fx["avg_wait"] - el["avg_wait"],
                 "delta_avg_transport_dist": fx["avg_transport_dist"] - el["avg_transport_dist"],
             })
     print(f"[Output] Policy comparison saved to {comparison_file}")
     
     # 6. Trend Visualization (metric vs code distance)
-    metrics = ["final_fidelity", "logical_failure_prob", "total_cycles", "distillation_overhead", "avg_wait", "p95_wait", "avg_transport_dist"]
-    for metric in metrics:
+    plot_metrics = [
+        "final_fidelity",
+        "logical_failure_prob",
+        "total_cycles",
+        "t_gate_latency",
+        "avg_wait",
+        "p95_wait",
+        "avg_transport_dist",
+        "avg_congestion",
+        "avg_n_distill",
+        "t_total_estimate",
+    ]
+    for metric in plot_metrics:
         plt.figure(figsize=(8, 5))
-        for policy in ["elastic", "fixed"]:
+        
+        for label, dataset in [("elastic", elastic_results), ("fixed", fixed_results)]:
             means = []
             ci_lows = []
             ci_highs = []
             for d in distances:
-                subset = [r for r in results if r["code_distance"] == d and r["policy"] == policy]
+                subset = [r for r in dataset if r["code_distance"] == d]
                 values = np.array([r[metric] for r in subset], dtype=float)
                 mean = float(np.mean(values))
                 stderr = float(np.std(values, ddof=1) / np.sqrt(len(values)))
@@ -272,14 +395,14 @@ if __name__ == "__main__":
                 ci_lows.append(mean - ci95)
                 ci_highs.append(mean + ci95)
             
-            plt.plot(distances, means, marker="o", linewidth=2, label=f"{policy}:{metric}")
+            plt.plot(distances, means, marker="o", linewidth=2, label=f"{label}:{metric}")
             plt.fill_between(distances, ci_lows, ci_highs, alpha=0.2)
         
         plt.xlabel("Code Distance (d)")
         plt.ylabel(metric)
-        plt.title(f"{metric} vs Code Distance")
+        plt.title(f"{metric} Comparison (Elastic vs Fixed)")
         plt.grid(True, linestyle="--", alpha=0.6)
         plt.legend()
-        plot_file = f"output/trend_{metric}.png"
+        plot_file = f"output/comparison_{metric}.png"
         plt.savefig(plot_file, dpi=300)
-        print(f"[Output] Trend plot saved to {plot_file}")
+        print(f"[Output] Comparison plot saved to {plot_file}")

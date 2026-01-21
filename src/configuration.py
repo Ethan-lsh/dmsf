@@ -14,33 +14,53 @@ class Configuration:
     SURFACE_CODE_P_TH = 0.01
     
     # Hotspot + Elastic Factory 정책 파라미터
-    HOTSPOT_TOP_FRACTION = 0.3
+    HOTSPOT_TOP_FRACTION = 0.3      # 상위 몇 % 핫스팟을 고려할지
     HOTSPOT_RADIUS = 2
     HOTSPOT_BUFFER = 2
     FACTORY_IDLE_TIMEOUT = 50
     
-    # === [NEW] Code Distance Parameter ===
+    # Distributed MSF 모델 파라미터 (변경 가능)
+    DISTRIBUTED_TOTAL_K = 1
+    DISTRIBUTED_DISTILL_ROUNDS = 3
+    DISTRIBUTED_FACTORY_SPACING = 4
+    DISTILLATION_BLOCK_N = 15
+    
     # d가 커질수록 오류는 줄어들지만, 실행 시간(Cycle)은 늘어납니다.
-    CODE_DISTANCE = 7  # 예: d=3, 5, 7, ...
+    CODE_DISTANCE = None  # None이면 자동 설정
     
     @staticmethod
     def get_logical_cycle_duration(base_ops):
         """
-        논리적 연산이 소요하는 실제 QEC 사이클 수 계산
-        Lattice Surgery 등을 고려할 때 시간은 d에 비례함.
+        Logical operation latency in surface code cycles
         """
         return base_ops * Configuration.CODE_DISTANCE
+
+    @staticmethod
+    def t_gate_latency_cycles():
+        """
+        Eq. (2) T-gate execution latency
+        E[T_T] = 4d + 4
+        """
+        return 4 * Configuration.CODE_DISTANCE + 4
+
+    @staticmethod
+    def distillation_time_cycles(rounds):
+        """
+        Eq. (8) Time per factory cycle
+        T_distill = 11 * sum d_r (d_r ~= d)
+        """
+        return 11 * rounds * Configuration.CODE_DISTANCE
     
     @staticmethod
     def logical_error_rate_per_cycle():
         """
-        Surface code 논리 오류율 근사
-        p_L ≈ A * (p_phys / p_th)^((d+1)/2)
+        Logical reliability (p_L)
+        Eq. (1) P_L ~ d * (100 * eps_in)^((d+1)/2)
+        Purpose: Map physical error rate to logical error rate based on code distance
         """
         d = Configuration.CODE_DISTANCE
-        ratio = Configuration.PHYS_ERROR_RATE / Configuration.SURFACE_CODE_P_TH
-        exponent = (d + 1) / 2.0
-        return Configuration.SURFACE_CODE_A * (ratio ** exponent)
+        eps_in = Configuration.PHYS_ERROR_RATE
+        return d * ((100.0 * eps_in) ** ((d + 1) / 2.0))
 
     @staticmethod
     def decoherence_survival(time_cycles):
@@ -54,16 +74,74 @@ class Configuration:
         return min(p_t1, p_t2)
 
     @staticmethod
-    def distill_15_to_1(input_error):
-        # (기존 로직 유지)
-        return max(35 * (input_error ** 3), Configuration.PHYS_ERROR_RATE)
+    def distributed_factory_k(total_k, num_factories, rounds):
+        """
+        Eq. (9) k = (K / X)^(1/l)
+        """
+        if num_factories <= 0 or rounds <= 0:
+            return 0.0
+        return (total_k / num_factories) ** (1.0 / rounds)
 
     @staticmethod
-    def distill_cascade(initial_error, rounds=2):
+    def distillation_threshold(k):
         """
-        다단계 15-to-1 증류 근사
+        Eq. (4) eps_thresh ≈ 1 / (3k + 1)
         """
-        err = initial_error
+        return 1.0 / (3.0 * k + 1.0) if k > 0 else 0.0
+
+    @staticmethod
+    def distillation_success_prob(eps_in, k):
+        """
+        Eq. (5) P_success ≈ 1 - (8 + 3k) * eps_in
+        """
+        return max(0.0, 1.0 - (8.0 + 3.0 * k) * eps_in)
+
+    @staticmethod
+    def distillation_output_error(eps_in, k):
+        """
+        Eq. (3) eps_out = (1 + 3k) * eps_in^2
+        """
+        return (1.0 + 3.0 * k) * (eps_in ** 2)
+
+    @staticmethod
+    def bravyi_haah_yield_ok(inject_error, total_k, num_factories, rounds):
+        """
+        Eq. (5) yield condition: P_success > 0
+        """
+        k = Configuration.distributed_factory_k(total_k, num_factories, rounds)
+        return Configuration.distillation_success_prob(inject_error, k) > 0.0
+
+    @staticmethod
+    def distributed_output_capacity(total_k, num_factories, rounds, inject_error):
+        """
+        Eq. (10) K_output = K * Π_r (1 - yield_loss_r)
+        """
+        k = Configuration.distributed_factory_k(total_k, num_factories, rounds)
+        eps = inject_error
+        capacity = total_k
         for _ in range(rounds):
-            err = Configuration.distill_15_to_1(err)
-        return err
+            p_success = Configuration.distillation_success_prob(eps, k)
+            capacity *= p_success
+            eps = Configuration.distillation_output_error(eps, k)
+        return capacity
+
+    @staticmethod
+    def distillation_module_count(rounds, k, block_n=None):
+        """
+        Eq. (7) N_distill = sum_{r=1}^l k^{r-1} n^{l-r}
+        """
+        if block_n is None:
+            block_n = Configuration.DISTILLATION_BLOCK_N
+        total = 0.0
+        for r in range(1, rounds + 1):
+            total += (k ** (r - 1)) * (block_n ** (rounds - r))
+        return total
+
+    @staticmethod
+    def distributed_factories_area(num_factories, total_k, rounds, code_distance):
+        """
+        Eq. (12) A_r ∝ X * (6k + 14) * d_r^2
+        """
+        k = Configuration.distributed_factory_k(total_k, num_factories, rounds)
+        return num_factories * (6.0 * k + 14.0) * (code_distance ** 2)
+    

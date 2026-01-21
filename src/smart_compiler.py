@@ -42,16 +42,8 @@ class SmartCompiler:
             reverse=True,
         )[:top_n]
         positions = [self.mapping[q] for q in hot_qubits if q in self.mapping]
-        
-        if positions:
-            xs = [p[0] for p in positions]
-            ys = [p[1] for p in positions]
-            center = (int(round(sum(xs) / len(xs))), int(round(sum(ys) / len(ys))))
-        else:
-            center = (self.grid_size // 2, self.grid_size // 2)
-        
+
         return {
-            "center": center,
-            "radius": Configuration.HOTSPOT_RADIUS,
+            "tiles": positions,
             "buffer": Configuration.HOTSPOT_BUFFER,
         }

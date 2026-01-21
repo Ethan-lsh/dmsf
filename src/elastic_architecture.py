@@ -20,27 +20,26 @@ class ElasticArchitecture:
             self.grid[x, y] = 1 # Storage
         if hotspot_info:
             self.set_hotspot(
-                hotspot_info["center"],
-                hotspot_info["radius"],
+                hotspot_info["tiles"],
                 hotspot_info["buffer"],
             )
 
-    def set_hotspot(self, center, radius, buffer_size):
-        self.hotspot_center = center
-        self.hotspot_radius = radius
+    def set_hotspot(self, tiles, buffer_size):
+        self.hotspot_center = None
+        self.hotspot_radius = 0
         self.hotspot_buffer = buffer_size
-        self.hotspot_tiles = set()
+        self.hotspot_tiles = set((x, y) for (x, y) in tiles)
         self.factory_zone_tiles = set()
         
-        cx, cy = center
-        for x in range(self.size):
-            for y in range(self.size):
-                dist = abs(x - cx) + abs(y - cy)
-                
-                if dist <= radius:
-                    self.hotspot_tiles.add((x, y))
-                elif dist <= radius + buffer_size:
-                    self.factory_zone_tiles.add((x, y))
+        for hx, hy in self.hotspot_tiles:
+            for dx in range(-buffer_size, buffer_size + 1):
+                for dy in range(-buffer_size, buffer_size + 1):
+                    if max(abs(dx), abs(dy)) > buffer_size:
+                        continue
+                    nx, ny = hx + dx, hy + dy
+                    if 0 <= nx < self.size and 0 <= ny < self.size:
+                        if (nx, ny) not in self.hotspot_tiles:
+                            self.factory_zone_tiles.add((nx, ny))
 
     def allocate_factory(self, x, y, force=False):
         if not force and not self.is_factory_zone_tile(x, y):
@@ -56,7 +55,7 @@ class ElasticArchitecture:
         if not self.factory_zone_tiles:
             return True
         return (x, y) in self.factory_zone_tiles
-
+    
     def find_nearest_factory_or_space(self, qx, qy, max_search_dist=None):
         """
         주어진 큐비트 위치(qx, qy)에서 가장 가까운
