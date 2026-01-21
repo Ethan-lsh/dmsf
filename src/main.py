@@ -1,14 +1,10 @@
-import networkx as nx
 import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
-from collections import deque, defaultdict
 import random
-import matplotlib
 
 # Qiskit Imports
 from qiskit import QuantumCircuit
-from qiskit.converters import circuit_to_dag
 
 from smart_compiler import SmartCompiler
 from quantum_workload import QasmWorkload
@@ -41,6 +37,25 @@ def generate_biased_qasm(num_qubits, num_gates):
             qc.h(q)
     return qc
 
+def _annotate_qubits(ax, logical_to_phys, color="blue", fontsize=8):
+    for q, (x, y) in logical_to_phys.items():
+        ax.text(y, x, f"Q{q}", ha="center", va="center", color=color, fontsize=fontsize)
+
+
+def _plot_factory_utilization(ax, utilization_history):
+    ax.plot(utilization_history)
+    ax.set_title("Dynamic Factory Utilization over Time")
+    ax.set_xlabel("Time (Cycles)")
+    ax.set_ylabel("Active Factories")
+    ax.grid(True)
+
+
+def _save_figure(fig, output_file):
+    fig.tight_layout()
+    fig.savefig(output_file, dpi=300)
+    print(f"[Output] Plot saved to {output_file}")
+
+
 def visualize_hotspot_and_utilization(sim, output_file):
     """
     의도된 핫스팟과 공장 가동률 시각화
@@ -55,18 +70,10 @@ def visualize_hotspot_and_utilization(sim, output_file):
     im = ax1.imshow(grid_map, cmap="Reds", interpolation="nearest")
     ax1.set_title("Hotspot Zone (T-gate Density)")
     fig.colorbar(im, ax=ax1)
-    for q, (x, y) in sim.arch.logical_to_phys.items():
-        ax1.text(y, x, f"Q{q}", ha="center", va="center", color="blue", fontsize=8)
-    
-    ax2.plot(sim.factory_utilization_history)
-    ax2.set_title("Dynamic Factory Utilization over Time")
-    ax2.set_xlabel("Time (Cycles)")
-    ax2.set_ylabel("Active Factories")
-    ax2.grid(True)
-    
-    plt.tight_layout()
-    plt.savefig(output_file, dpi=300)
-    print(f"[Output] Plot saved to {output_file}")
+    _annotate_qubits(ax1, sim.arch.logical_to_phys, color="blue", fontsize=8)
+
+    _plot_factory_utilization(ax2, sim.factory_utilization_history)
+    _save_figure(fig, output_file)
 
 def visualize_hotspot_and_factories(sim, output_file):
     """
@@ -86,10 +93,9 @@ def visualize_hotspot_and_factories(sim, output_file):
     ax1.set_title("Hotspot Tile Error Rate")
     ax1.set_xticks([])
     ax1.set_yticks([])
-    
-    for q, (x, y) in arch.logical_to_phys.items():
-        ax1.text(y, x, f"Q{q}", ha="center", va="center", fontsize=6, color="black")
-    
+
+    _annotate_qubits(ax1, arch.logical_to_phys, color="black", fontsize=6)
+
     fig.colorbar(im, ax=ax1)
 
     for (x, y) in arch.factory_zone_tiles:
@@ -131,14 +137,8 @@ def visualize_hotspot_and_factories(sim, output_file):
     ]
     ax1.legend(handles=legend_items, loc="upper right", fontsize=8, framealpha=0.9)
     
-    ax2.plot(sim.factory_utilization_history)
-    ax2.set_title("Dynamic Factory Utilization over Time")
-    ax2.set_xlabel("Time (Cycles)")
-    ax2.set_ylabel("Active Factories")
-    ax2.grid(True)
-    plt.tight_layout()
-    plt.savefig(output_file, dpi=300)
-    print(f"[Output] Plot saved to {output_file}")
+    _plot_factory_utilization(ax2, sim.factory_utilization_history)
+    _save_figure(fig, output_file)
 
 if __name__ == "__main__":
     # 1. Setup (Monte Carlo)
